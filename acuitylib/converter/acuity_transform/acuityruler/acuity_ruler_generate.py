@@ -88,6 +88,16 @@ def r_fullconnect_op_2_fc_pre_condition(self, node, tensor):
     fc = self.net.get_layer(node['fullconnect_op'])
     return not has_bias and fc.get_in_shape(0).rank == 2 and fc.get_in_shape(1).rank == 2
 
+@rule_pyfunc_def
+def r_layernorm_check_axis(self, node, tensor):
+    axis_list = self.attr_pick(node['reducemean'], 'axis_list')
+    perm = [0, 3, 1, 2]
+    index_perm = {value: index for index, value in enumerate(perm)}
+    index_axis = []
+    for i in axis_list:
+        index_axis.append(index_perm.get(i))
+    return sorted(index_axis) == list(range(min(index_axis), max(index_axis)+1))
+
 r_instancenorm = {
 "ruler_name": "r_instancenorm",
 "src_ops_alias": ["pooling", "squared_difference", "pooling_1", "Add", "Rsqrt", "Multiply", "Multiply_1", \
@@ -1275,11 +1285,231 @@ r_layernormal = {
                        }
 },
 "priority_tip": 0,
-"pre_condition": None,
+"pre_condition": r_layernorm_check_axis(),
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_layernormal)
 
+r_mish = {
+"ruler_name": "r_mish",
+"src_ops_alias": ["multiply", "tanh", "log", "add", "exp", "variable"],
+"src_inter_flow": [["tanh:out0", "multiply:in1"], ["log:out0", "tanh:in0"], ["add:out0", "log:in0"],
+                   ["exp:out0", "add:in0"], ["variable:out0", "add:in1"]],
+"src_in_anchor": [["I_0:out0", "exp:in0"], ["I_0:out0", "multiply:in0"]],
+"src_out_tensor": ["multiply:out0"],
+"acu_lys_alias": ["mish"],
+"src_acu_in_tensor_map": [["I_0:out0", "mish:in0"]],
+"src_acu_out_tensor_map": [["multiply:out0", "mish:out0"]],
+"acu_inter_flow": [],
+"param_map": {"mish": {}},
+"blob_map": {"mish": {}},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_mish)
+
+r_tflite_layernormlize = {
+"ruler_name": "r_tflite_layernormlize",
+"src_ops_alias": ["add", "multiply", "Subtract", "multiply_1", "variable", "multiply_2", "rsqrt", "variable_1",
+                  "reducemean", "add_1", "reducemean_1", "variable_2", "squared_difference"],
+"src_inter_flow": [["multiply:out0", "add:in0"], ["Subtract:out0", "add:in1"], ["multiply_1:out0", "multiply:in1"],
+                   ["variable:out0", "Subtract:in0"], ["multiply_2:out0", "Subtract:in1"],
+                   ["rsqrt:out0", "multiply_1:in0"], ["variable_1:out0", "multiply_1:in1"],
+                   ["reducemean:out0", "multiply_2:in0"], ["multiply_1:out0", "multiply_2:in1"],
+                   ["add_1:out0", "rsqrt:in0"], ["reducemean_1:out0", "add_1:in0"], ["variable_2:out0", "add_1:in1"],
+                   ["squared_difference:out0", "reducemean_1:in0"], ["reducemean:out0", "squared_difference:in1"]],
+"src_in_anchor": [["I_0:out0", "reducemean:in0"], ["I_0:out0", "squared_difference:in0"],
+                  ["I_0:out0", "multiply:in0"]],
+"src_out_tensor": ["add:out0"],
+"acu_lys_alias": ["layernormalize"],
+"src_acu_in_tensor_map": [["I_0:out0", "layernormalize:in0"]],
+"src_acu_out_tensor_map": [["add:out0", "layernormalize:out0"]],
+"acu_inter_flow": [],
+"param_map": {
+    "layernormalize": {
+        'eps': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['variable_2:out0'], 'data')"],
+        'axis_list': ['INTS', 'CODE', "self.attr_pick(node['reducemean'], 'axis_list')"],
+    }
+},
+"blob_map": {
+    "layernormalize": {
+        'scale': ['CODE', "self.get_value_attr(node['variable_1'], 'data')"],
+        'bias': ['CODE', "self.get_value_attr(node['variable'], 'data')"],
+    }
+},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_tflite_layernormlize)
+
+r_tflite_groupnormalize = {
+"ruler_name": "r_tflite_groupnormalize",
+"src_ops_alias": ["reshape", "add", "expand_broadcast", "expand_broadcast_1", "multiply", "Subtract",
+                  "expand_broadcast_2", "expand_broadcast_3", "variable", "multiply_1", "reshape_1", "multiply_2",
+                  "expand_broadcast_4", "expand_broadcast_5", "expand_broadcast_6", "expand_broadcast_7",
+                  "reducemean", "rsqrt", "variable_1", "add_1", "expand_broadcast_8", "expand_broadcast_9",
+                  "reducemean_1", "variable_2", "square", "Subtract_1"],
+"src_inter_flow": [["add:out0", "reshape:in0"], ["expand_broadcast:out0", "add:in0"],
+                   ["expand_broadcast_1:out0", "add:in1"], ["multiply:out0", "expand_broadcast:in0"],
+                   ["Subtract:out0", "expand_broadcast_1:in0"], ["expand_broadcast_2:out0", "multiply:in0"],
+                   ["expand_broadcast_3:out0", "multiply:in1"], ["variable:out0", "Subtract:in0"],
+                   ["multiply_1:out0", "Subtract:in1"], ["reshape_1:out0", "expand_broadcast_2:in0"],
+                   ["multiply_2:out0", "expand_broadcast_3:in0"], ["expand_broadcast_4:out0", "multiply_1:in0"],
+                   ["expand_broadcast_5:out0", "multiply_1:in1"], ["expand_broadcast_6:out0", "multiply_2:in0"],
+                   ["expand_broadcast_7:out0", "multiply_2:in1"], ["reducemean:out0", "expand_broadcast_4:in0"],
+                   ["multiply_2:out0", "expand_broadcast_5:in0"], ["rsqrt:out0", "expand_broadcast_6:in0"],
+                   ["variable_1:out0", "expand_broadcast_7:in0"], ["reshape_1:out0", "reducemean:in0"],
+                   ["add_1:out0", "rsqrt:in0"], ["expand_broadcast_8:out0", "add_1:in0"],
+                   ["expand_broadcast_9:out0", "add_1:in1"], ["reducemean_1:out0", "expand_broadcast_8:in0"],
+                   ["variable_2:out0", "expand_broadcast_9:in0"], ["square:out0", "reducemean_1:in0"],
+                   ["Subtract_1:out0", "square:in0"], ["reshape_1:out0", "Subtract_1:in0"],
+                   ["reducemean:out0", "Subtract_1:in1"]],
+"src_in_anchor": [["I_0:out0", "reshape_1:in0"]],
+"src_out_tensor": ["reshape:out0"],
+"acu_lys_alias": ["groupnormalize"],
+"src_acu_in_tensor_map": [["I_0:out0", "groupnormalize:in0"]],
+"src_acu_out_tensor_map": [["reshape:out0", "groupnormalize:out0"]],
+"acu_inter_flow": [],
+"param_map": {
+    "groupnormalize": {
+        'eps': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['variable_2:out0'], 'data')"],
+        # reducemean shape: [n, spatial_shape, group, new_c]
+        'num_groups': ['INT', 'CODE', "self.shape_pick(node['reducemean'])[-2]"]
+    }
+},
+"blob_map": {
+    "groupnormalize": {
+        'scale': ['CODE', "self.get_value_attr(node['variable_1'], 'data')"],
+        'bias': ['CODE', "self.get_value_attr(node['variable'], 'data')"],
+    }
+},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]
+}
+ruler_list.append(r_tflite_groupnormalize)
+
+r_tflite_groupnormalize_1 = {
+"ruler_name": "r_tflite_groupnormalize_1",
+"src_ops_alias": ["reshape", "add", "multiply", "expand_broadcast", "reshape_1", "expand_broadcast_1",
+                  "Subtract", "multiply_1", "variable", "multiply_2", "expand_broadcast_2", "variable_1",
+                  "expand_broadcast_3", "rsqrt", "reducemean", "add_1", "reducemean_1", "variable_2", "square",
+                  "Subtract_1"],
+"src_inter_flow": [["add:out0", "reshape:in0"], ["multiply:out0", "add:in0"], ["expand_broadcast:out0", "add:in1"],
+                   ["reshape_1:out0", "multiply:in0"], ["expand_broadcast_1:out0", "multiply:in1"],
+                   ["Subtract:out0", "expand_broadcast:in0"], ["multiply_1:out0", "expand_broadcast_1:in0"],
+                   ["variable:out0", "Subtract:in0"], ["multiply_2:out0", "Subtract:in1"],
+                   ["expand_broadcast_2:out0", "multiply_1:in0"], ["variable_1:out0", "multiply_1:in1"],
+                   ["expand_broadcast_3:out0", "multiply_2:in0"], ["multiply_1:out0", "multiply_2:in1"],
+                   ["rsqrt:out0", "expand_broadcast_2:in0"], ["reducemean:out0", "expand_broadcast_3:in0"],
+                   ["add_1:out0", "rsqrt:in0"], ["reshape_1:out0", "reducemean:in0"],
+                   ["reducemean_1:out0", "add_1:in0"], ["variable_2:out0", "add_1:in1"],
+                   ["square:out0", "reducemean_1:in0"], ["Subtract_1:out0", "square:in0"],
+                   ["reshape_1:out0", "Subtract_1:in0"], ["reducemean:out0", "Subtract_1:in1"]],
+"src_in_anchor": [["I_0:out0", "reshape_1:in0"]],
+"src_out_tensor": ["reshape:out0"],
+"acu_lys_alias": ["groupnormalize"],
+"src_acu_in_tensor_map": [["I_0:out0", "groupnormalize:in0"]],
+"src_acu_out_tensor_map": [["reshape:out0", "groupnormalize:out0"]],
+"acu_inter_flow": [],
+"param_map": {
+    "groupnormalize": {
+        'eps': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['variable_2:out0'], 'data').flatten()[0]"],
+        # reducemean shape: [n, spatial_shape, group, new_c]
+        'num_groups': ['INT', 'CODE', "self.shape_pick(node['reducemean'])[-2]"]
+    }
+},
+"blob_map": {
+    "groupnormalize": {
+        'scale': ['CODE', "self.get_value_attr(node['variable_1'], 'data')"],
+        'bias': ['CODE', "self.get_value_attr(node['variable'], 'data')"],
+    }
+},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_tflite_groupnormalize_1)
+
+r_tflite_groupnormalize_no_scale = {
+"ruler_name": "r_tflite_groupnormalize_no_scale",
+"src_ops_alias": ["reshape", "add", "multiply", "expand_broadcast", "reshape_1", "expand_broadcast_1", "Subtract",
+                  "rsqrt", "variable", "multiply_1", "add_1", "reducemean", "reducemean_1", "variable_1",
+                  "square", "Subtract_1"],
+"src_inter_flow": [["add:out0", "reshape:in0"], ["multiply:out0", "add:in0"], ["expand_broadcast:out0", "add:in1"],
+                   ["reshape_1:out0", "multiply:in0"], ["expand_broadcast_1:out0", "multiply:in1"],
+                   ["Subtract:out0", "expand_broadcast:in0"], ["rsqrt:out0", "expand_broadcast_1:in0"],
+                   ["variable:out0", "Subtract:in0"], ["multiply_1:out0", "Subtract:in1"],
+                   ["add_1:out0", "rsqrt:in0"], ["reducemean:out0", "multiply_1:in0"],
+                   ["rsqrt:out0", "multiply_1:in1"], ["reducemean_1:out0", "add_1:in0"],
+                   ["variable_1:out0", "add_1:in1"], ["reshape_1:out0", "reducemean:in0"],
+                   ["square:out0", "reducemean_1:in0"], ["Subtract_1:out0", "square:in0"],
+                   ["reshape_1:out0", "Subtract_1:in0"], ["reducemean:out0", "Subtract_1:in1"]],
+"src_in_anchor": [["I_0:out0", "reshape_1:in0"]],
+"src_out_tensor": ["reshape:out0"],
+"acu_lys_alias": ["groupnormalize"],
+"src_acu_in_tensor_map": [["I_0:out0", "groupnormalize:in0"]],
+"src_acu_out_tensor_map": [["reshape:out0", "groupnormalize:out0"]],
+"acu_inter_flow": [],
+"param_map": {
+    "groupnormalize": {
+        'eps': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['variable_1:out0'], 'data').flatten()[0]"],
+        'num_groups': ['INT', 'CODE', "self.shape_pick(node['reducemean'])[-2]"]
+    }
+},
+"blob_map": {
+    "groupnormalize": {
+        'scale': ['CODE', "self.fill_constant_tensor(1, self.get_output_shape(node['variable']))"],
+        'bias': ['CODE', "self.get_value_attr(node['variable'], 'data')"],
+    }
+},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_tflite_groupnormalize_no_scale)
+
+r_tflite_groupnormalize_no_scale_1 = {
+"ruler_name": "r_tflite_groupnormalize_no_scale_1",
+"src_ops_alias": ["reshape", "add", "multiply", "expand_broadcast", "reshape_1", "expand_broadcast_1", "Subtract",
+                  "expand_broadcast_2", "variable", "multiply_1", "rsqrt", "expand_broadcast_3", "add_1",
+                  "reducemean", "reducemean_1", "variable_1", "square", "Subtract_1"],
+"src_inter_flow": [["add:out0", "reshape:in0"], ["multiply:out0", "add:in0"], ["expand_broadcast:out0", "add:in1"],
+                   ["reshape_1:out0", "multiply:in0"], ["expand_broadcast_1:out0", "multiply:in1"],
+                   ["Subtract:out0", "expand_broadcast:in0"], ["expand_broadcast_2:out0", "expand_broadcast_1:in0"],
+                   ["variable:out0", "Subtract:in0"], ["multiply_1:out0", "Subtract:in1"],
+                   ["rsqrt:out0", "expand_broadcast_2:in0"], ["expand_broadcast_3:out0", "multiply_1:in0"],
+                   ["expand_broadcast_2:out0", "multiply_1:in1"], ["add_1:out0", "rsqrt:in0"],
+                   ["reducemean:out0", "expand_broadcast_3:in0"], ["reducemean_1:out0", "add_1:in0"],
+                   ["variable_1:out0", "add_1:in1"], ["reshape_1:out0", "reducemean:in0"],
+                   ["square:out0", "reducemean_1:in0"], ["Subtract_1:out0", "square:in0"],
+                   ["reshape_1:out0", "Subtract_1:in0"], ["reducemean:out0", "Subtract_1:in1"]],
+"src_in_anchor": [["I_0:out0", "reshape_1:in0"]],
+"src_out_tensor": ["reshape:out0"],
+"acu_lys_alias": ["groupnormalize"],
+"src_acu_in_tensor_map": [["I_0:out0", "groupnormalize:in0"]],
+"src_acu_out_tensor_map": [["reshape:out0", "groupnormalize:out0"]],
+"acu_inter_flow": [],
+"param_map": {
+    "groupnormalize": {
+        'eps': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['variable_1:out0'], 'data').flatten()[0]"],
+        'num_groups': ['INT', 'CODE', "self.shape_pick(node['reducemean'])[-2]"]
+    }
+},
+"blob_map": {
+    "groupnormalize": {
+        'scale': ['CODE', "self.fill_constant_tensor(1, self.get_output_shape(node['variable']))"],
+        'bias': ['CODE', "self.get_value_attr(node['variable'], 'data')"],
+    }
+},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_tflite_groupnormalize_no_scale_1)
 
 def gen_acuity_ruler(dst_path):
     # print(json.dumps(ruler_list))

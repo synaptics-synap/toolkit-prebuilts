@@ -157,6 +157,8 @@ def r_softmax_pre_cond(self, node, tensor):
                 return True
         elif input_rank == 2:
             return True
+        elif input_rank == 1:
+            return True
         return False
     return True
 
@@ -247,8 +249,8 @@ def r_depthwise_conv1d_pre_condition(self, node, tensor):
     return ret
 
 @rule_pyfunc_def
-def r_pad_value_map(self, node, tensor):
-    pad_np = self.tensor_to_numpy(tensor['Constant:out0'])
+def r_pad_value_map(self, node, tensor, pads_name='Constant:out0'):
+    pad_np = self.tensor_to_numpy(tensor[pads_name])
     axes = tensor.get('Constant_2:out0', None)
     pads = list(pad_np)
     pads = [int(p) for p in pads]
@@ -511,6 +513,32 @@ def r_center_crop_pad_shape(self, node, tensor, in_tensor):
         out_shape = shape
     return out_shape
 
+"""
+Synaptics change BEGIN 
+
+vsi patch to resolve the INT16 quantization issue with the Optical Character Recognition (OCR) model.
+
+This change from vsi primarily focuses on:
+- Fusing conv + mul + add operations into a single conv operation for optimization.
+"""
+@rule_pyfunc_def
+def r_conv_mul_add_pre_condition(self, node, tensor):
+    # y=(xw+b)m+a --> x(wm) + (bm+a)
+    # m need to be broadcastable with w and b, a to be broadcastable with b
+    m_shape = list(self.tensor_to_numpy(tensor['Constant_1:out0']).shape)  # mul_const input
+    a_shape = list(self.tensor_to_numpy(tensor['Constant:out0']).shape)  # add_const input
+    b_shape = list(self.tensor_to_numpy(tensor['Constant_3:out0']).shape)  # bias
+    m_rank = len(m_shape)
+    a_rank = len(a_shape)
+    b_rank = len(b_shape)
+    # only could be one data array or a scalar
+    if (m_rank == 0 or (m_rank == 1 and (m_shape[0] == 1 or b_shape[0] == 1 or m_shape[0] == b_shape[0]))) and \
+            (a_rank == 0 or (a_rank == 1 and (a_shape[0] == 1 or b_shape[0] == 1 or a_shape[0] == b_shape[0]))):
+        return True
+    return False
+""" 
+Synaptics change END 
+"""
 
 @rule_pyfunc_def
 def r_col2im_pads(self, node, tensor):
@@ -533,21 +561,42 @@ r_variable = {
 "src_acu_out_tensor_map": [["Constant:out0", "variable:out0"]],
 "param_map": {"variable": {'shape': ['ORIGIN', 'CODE', "self.shape_pick(tensor['Constant:out0'])"],
                            'is_scalar': ['BOOL', 'CODE',
-                           "True if len(self.tensor_to_numpy_without_convert_0darry(tensor['Constant:out0']).shape) "
+                           "True if len(self.tensor_to_numpy(tensor['Constant:out0']).shape) "
                            "== 0 else False "],
                            'type': ["STRING", "CODE", "self.dtype_pick(tensor['Constant:out0'])"],
                            }},
 "blob_map": {"variable": {'data':
                               ['CODE',
-                               "np.array([self.tensor_to_numpy(tensor['Constant:out0'])]) "\
-                               " if self.tensor_to_numpy(tensor['Constant:out0']).shape == () "\
-                               "else self.tensor_to_numpy(tensor['Constant:out0'])"],}},
+                               "self.tensor_to_numpy(tensor['Constant:out0'])"],}},
 "acu_inter_flow": [],
 "priority_tip": 0,
 "pre_condition": None,
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_variable)
+
+r_constantofshape = {
+    "ruler_name": "r_constantofshape",
+    "src_ops_alias": ["ConstantOfShape"],
+    "src_inter_flow": [],
+    "src_in_anchor": [],
+    "src_out_tensor": ["ConstantOfShape:out0"],
+    "acu_lys_alias": ["variable"],
+    "src_acu_in_tensor_map": [],
+    "src_acu_out_tensor_map": [["ConstantOfShape:out0", "variable:out0"]],
+    "param_map": {"variable": {'shape': ['ORIGIN', 'CODE', "self.shape_pick(tensor['ConstantOfShape:out0'])"],
+                               'is_scalar': ['BOOL', 'CODE',
+                                             "True if len(self.tensor_to_numpy(tensor['ConstantOfShape:out0']).shape) "
+                                             "== 0 else False "],
+                               'type': ["STRING", "CODE", "self.dtype_pick(tensor['ConstantOfShape:out0'])"],
+                               }},
+    "blob_map": {"variable": {'data': ['CODE', "self.tensor_to_numpy(tensor['ConstantOfShape:out0'])"]}},
+    "acu_inter_flow": [],
+    "priority_tip": 0,
+    "pre_condition": "self.is_const_tensor(tensor['ConstantOfShape:out0'])",
+    "src_ops_main_version": None,
+    "src_ops_minior_version": [1, -1]}
+ruler_list.append(r_constantofshape)
 
 r_rsp_mm_add = {
 "ruler_name": "r_rsp_mm_add",
@@ -655,7 +704,7 @@ r_qlinearmatmul_to_fc = {
     ["CODE", "self.qnt_in_tensor(acu_ly['fullconnect'], tensor['Constant:out0'], tensor['Constant_1:out0'], 0)"]
 ],
 "priority_tip": 0,
-"pre_condition": "self.tensor_to_numpy(tensor['Constant_3:out0']).shape[0] > 1",
+"pre_condition": None,
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 # QLinearMatMul:QLinearMatMul_Gemm_104_MatMul_quant;
@@ -783,10 +832,46 @@ r_gemm_3_inputs = {
     }
 },
 "priority_tip": 0,
-"pre_condition": None,
+"pre_condition": "self.attr_pick(node['Gemm'], 'beta', 0) in [0, 1]",
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_gemm_3_inputs)
+
+r_gemm_beta = {
+"ruler_name": "r_gemm_beta",
+"src_ops_alias": ["Gemm", "Constant", "Constant_1"],
+"src_inter_flow": [["Constant:out0", "Gemm:in1"], ["Constant_1:out0", "Gemm:in2"]],
+"src_in_anchor": [["I_0:out0", "Gemm:in0"]],
+"src_out_tensor": ["Gemm:out0"],
+"acu_lys_alias": ["matmul", "add", "variable", "variable_1"],
+"src_acu_in_tensor_map":[["I_0:out0", "matmul:in0"]],
+"src_acu_out_tensor_map": [["Gemm:out0", "add:out0"]],
+"acu_inter_flow": [["variable:out0", "matmul:in1"], ["matmul:out0", "add:in0"], ['variable_1:out0', "add:in1"]],
+"param_map":{
+    "matmul":{
+        'transpose_a': ['BOOL', 'CODE', "False if self.attr_pick(node['Gemm'], 'transA', 0) == 0 else True"],
+        'transpose_b': ['BOOL', 'CODE', "False if self.attr_pick(node['Gemm'], 'transB', 0) == 0 else True"],
+    },
+    "variable": {
+        'shape': ['ORIGIN', 'CODE', "self.shape_pick(tensor['Constant:out0'])"],
+    },
+    "variable_1": {
+        'shape': ['ORIGIN', 'CODE', "self.shape_pick(tensor['Constant_1:out0'])"],
+    }
+},
+"blob_map": {
+    "variable": {
+        'data': ["CODE", "self.tensor_to_numpy(tensor['Constant:out0']) * self.attr_pick(node['Gemm'], 'alpha', 1)"]
+    },
+    "variable_1": {
+        'data': ["CODE", "self.tensor_to_numpy(tensor['Constant_1:out0']) * self.attr_pick(node['Gemm'], 'beta', 1)"]
+    }
+},
+"priority_tip": 0,
+"pre_condition": "self.attr_pick(node['Gemm'], 'beta', 0) not in [0, 1]",
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_gemm_beta)
 
 r_gemm_bias = {
 "ruler_name": "r_gemm_bias",
@@ -1123,6 +1208,24 @@ r_tanh = {
 "src_ops_main_version": None,
 "src_ops_minior_version": None}
 ruler_list.append(r_tanh)
+
+r_tan = {
+    "ruler_name": "r_tan",
+    "src_ops_alias": ["Tan"],
+    "src_inter_flow": [],
+    "src_in_anchor": [["I:out0", "Tan:in0"]],
+    "src_out_tensor": ["Tan:out0"],
+    "acu_lys_alias": ["tan"],
+    "src_acu_in_tensor_map": [["I:out0", "tan:in0"]],
+    "src_acu_out_tensor_map": [["Tan:out0", "tan:out0"]],
+    "param_map": {},
+    "blob_map": {},
+    "acu_inter_flow": [],
+    "priority_tip": 0,
+    "pre_condition": None,
+    "src_ops_main_version": None,
+    "src_ops_minior_version": None}
+ruler_list.append(r_tan)
 
 r_atan = {
 "ruler_name": "r_atan",
@@ -2439,6 +2542,41 @@ r_deconvolution_with_add = {
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_deconvolution_with_add)
 
+r_deconvolution_op = {
+"ruler_name": 'r_deconvolution_op',
+"src_ops_alias": ["ConvTranspose"],
+"src_inter_flow": [],
+"src_in_anchor": [["I_0:out0", "ConvTranspose:in0"], ["I_1:out0", "ConvTranspose:in1"]],
+"src_out_tensor": ["ConvTranspose:out0"],
+"acu_lys_alias": ["deconvolution_op"],
+"src_acu_in_tensor_map": [["I_0:out0", "deconvolution_op:in0"], ["I_1:out0", "deconvolution_op:in1"]],
+"src_acu_out_tensor_map": [["ConvTranspose:out0", "deconvolution_op:out0"]],
+"acu_inter_flow": [],
+"param_map": {"deconvolution_op": {
+    "output_shape": ["INTS", "CODE", "self.attr_pick(node['ConvTranspose'], '_out_shape')[0]"],
+    "padding":
+        ["STRING", "CODE",
+         "'SAME' if self.attr_pick(node['ConvTranspose'], 'auto_pad', 'NOTSET') in ['SAME_UPPER', 'SAME_LOWER'] "
+         "else 'VALID' "],
+    "pad":
+        ["INTS",
+         "CODE",
+         "[p for p in self.array_layout(self.attr_pick(node['ConvTranspose'], 'pads', "
+         "[ 0, 0, 0, 0]), [0, 2, 1, 3])]"],
+    "group_number": ["INT", "CODE", "self.attr_pick(node['ConvTranspose'], 'group', 1)"],
+    "ksize_w": ["INT", "CODE", "self.attr_pick(node['ConvTranspose'], 'kernel_shape', [1, 1])[1]"],
+    "ksize_h": ["INT", "CODE", "self.attr_pick(node['ConvTranspose'], 'kernel_shape', [1, 1])[0]"],
+    "stride_w": ["INT", "CODE", "self.attr_pick(node['ConvTranspose'], 'strides', [1, 1])[1]"],
+    "stride_h": ["INT", "CODE", "self.attr_pick(node['ConvTranspose'], 'strides', [1, 1])[0]"],
+    "dilation": ["INTS", "CODE", "self.conv_dilation(node['ConvTranspose'])"],
+    }},
+"blob_map": {"deconvolution_op": {}},
+"priority_tip": 0,
+"pre_condition": "len(self.shape_pick(tensor['I_1:out0'])) == 4",
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_deconvolution_op)
+
 r_deconv1d_no_bias = {
 "ruler_name": "r_dconv1d_no_bias",
 "src_ops_alias": ["ConvTranspose", "Constant_0"],
@@ -2994,7 +3132,7 @@ r_mm_nb_mean_variance_normalization = {
 "blob_map": {"batchnorm_single": {"scale": ['CODE', "np.array([1], dtype=np.float32)"],
              "bias": ['CODE', "np.array([0], dtype=np.float32)"]}},
 "priority_tip": 0,
-"pre_condition": "self.attr_pick(node['MeanVarianceNormalization'], 'axes', [0, 2, 3]) != [0, 2, 3]",
+"pre_condition": "self.attr_pick(node['MeanVarianceNormalization'], 'axes', [0, 2, 3]) != [2, 3]",
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_mm_nb_mean_variance_normalization)
@@ -3025,7 +3163,8 @@ r_maxpool = {
        ["INTS",
         "CODE",
         "[p for p in self.array_layout(self.attr_pick(node['MaxPool'], 'pads', [ 0, 0, 0, 0]), [0, 2, 1, 3])]"],
-   "pad_w": ["INT", "CODE", "self.attr_pick(node['MaxPool'], 'pads', [0, 0, 0, 0])[1]"]}},
+   "pad_w": ["INT", "CODE", "self.attr_pick(node['MaxPool'], 'pads', [0, 0, 0, 0])[1]"],
+   "dilation": ["INTS", "CODE", "self.conv_dilation(node['MaxPool'])"]}},
 "blob_map": {},
 "acu_inter_flow": [],
 "priority_tip": 0,
@@ -3066,6 +3205,7 @@ r_maxpool_3d = {
         "CODE",
         "[p for p in self.array_layout(self.attr_pick(node['MaxPool'], 'pads',"
         " [ 0, 0, 0, 0, 0, 0]), [0, 3, 1, 4, 2, 5])]"],
+   "dilation": ["INTS", "CODE", "self.conv_dilation(node['MaxPool'])"],
    }},
 "blob_map": {"pool3d": {}},
 "priority_tip": 0,
@@ -3103,7 +3243,8 @@ r_avgpool = {
     "[str(p) for p in self.array_layout(self.attr_pick(node['AveragePool'], 'pads', [ 0, 0, 0, 0]), [0, 2, 1, 3])]"
     ],
 "pad_w": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'pads', [0, 0, 0, 0])[1]"],
-"count_include_pad": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'count_include_pad', 0)"]}},
+"count_include_pad": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'count_include_pad', 0)"],
+"dilation": ["INTS", "CODE", "self.conv_dilation(node['AveragePool'])"]}},
 "blob_map": {},
 "acu_inter_flow": [],
 "priority_tip": 0,
@@ -3136,6 +3277,7 @@ r_avgpool1d = {
     "CODE",
     "[str(p) for p in self.array_layout(self.attr_pick(node['AveragePool'], 'pads', [ 0, 0]), [0, 1])]"
     ],
+"dilation": ["INTS", "CODE", "self.conv_dilation(node['AveragePool'])"]
 }},
 "blob_map": {},
 "acu_inter_flow": [],
@@ -3164,16 +3306,17 @@ r_avgpool3d = {
     "pad_h": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'pads', [0, 0, 0, 0, 0, 0])[0]"],
     "pad_w": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'pads', [0, 0, 0, 0, 0, 0])[1]"],
     "pad_d": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'pads', [0, 0, 0, 0, 0, 0])[2]"],
-    "ksize_h": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'kernel_shape')[0]"],
-    "ksize_w": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'kernel_shape')[1]"],
-    "ksize_d": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'kernel_shape')[2]"],
-    "stride_h": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'strides', [1, 1, 1])[0]"],
-    "stride_w": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'strides', [1, 1, 1])[1]"],
-    "stride_d": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'strides', [1, 1, 1])[2]"],
+    "ksize_d": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'kernel_shape')[0]"],
+    "ksize_h": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'kernel_shape')[1]"],
+    "ksize_w": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'kernel_shape')[2]"],
+    "stride_d": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'strides', [1, 1, 1])[0]"],
+    "stride_h": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'strides', [1, 1, 1])[1]"],
+    "stride_w": ["INT", "CODE", "self.attr_pick(node['AveragePool'], 'strides', [1, 1, 1])[2]"],
     "round_type": ["STRING", "CODE", "'ceil' if self.attr_pick(node['AveragePool'], 'ceil_mode') == 1 else 'floor'"],
     "padding": ['STRING', 'PYFUNC', r_pool_padding(pool_type='AveragePool')],
     "pad": ["INTS", "CODE", "[str(p) for p in self.array_layout(self.attr_pick(node['AveragePool'], "
                             "'pads', [ 0, 0, 0, 0, 0, 0]), [0, 2, 4, 1, 3, 5])]"],
+    "dilation": ["INTS", "CODE", "self.conv_dilation(node['AveragePool'])"]
     }},
 "blob_map": {"pool3d": {}},
 "priority_tip": 0,
@@ -3342,6 +3485,7 @@ r_maxpool1d = {
             "CODE",
          "'SAME' if self.attr_pick(node['MaxPool'], 'auto_pad', 'NOTSET') in ['SAME_UPPER', 'SAME_LOWER'] else 'VALID'"
         ],
+        "dilation": ["INTS", "CODE", "self.conv_dilation(node['MaxPool'])"]
 }},
 "blob_map": {},
 "acu_inter_flow": [],
@@ -3414,22 +3558,40 @@ r_rsp_v5x = {
 ruler_list.append(r_rsp_v5x)
 
 r_dynamic_rsp_5x = {
-"ruler_name": "r_dynamic_rsp_5x",
+    "ruler_name": "r_dynamic_rsp_5x",
+    "src_ops_alias": ["Reshape"],
+    "src_inter_flow": [],
+    "src_in_anchor": [["I:out0", "Reshape:in0"], ["I_1:out0", "Reshape:in1"]],
+    "src_out_tensor": ["Reshape:out0"],
+    "acu_lys_alias": ["reshape"],
+    "src_acu_in_tensor_map": [["I:out0", "reshape:in0"]],
+    "src_acu_out_tensor_map": [["Reshape:out0", "reshape:out0"]],
+    "param_map": {"reshape": {"shape": ["INTS", "CODE", "self.tensor_to_numpy(tensor['I_1:out0'])"]}},
+    "blob_map": {},
+    "acu_inter_flow": [],
+    "priority_tip": 0,
+    "pre_condition": "self.is_const_tensor(tensor['I_1:out0'])",
+    "src_ops_main_version": None,
+    "src_ops_minior_version": [5, -1]}
+ruler_list.append(r_dynamic_rsp_5x)
+
+r_dynamic_rsp_6x = {
+"ruler_name": "r_dynamic_rsp_6x",
 "src_ops_alias": ["Reshape"],
 "src_inter_flow": [],
 "src_in_anchor": [["I:out0", "Reshape:in0"], ["I_1:out0", "Reshape:in1"]],
 "src_out_tensor": ["Reshape:out0"],
 "acu_lys_alias": ["reshape"],
-"src_acu_in_tensor_map": [["I:out0", "reshape:in0"]],
+"src_acu_in_tensor_map": [["I:out0", "reshape:in0"], ["I_1:out0", "reshape:in1"]],
 "src_acu_out_tensor_map": [["Reshape:out0", "reshape:out0"]],
-"param_map": {"reshape": {"shape": ["INTS", "CODE", "self.tensor_to_numpy(tensor['I_1:out0'])"]}},
+"param_map": {},
 "blob_map": {},
 "acu_inter_flow": [],
 "priority_tip": 0,
 "pre_condition": None,
 "src_ops_main_version": None,
 "src_ops_minior_version": [5, -1]}
-ruler_list.append(r_dynamic_rsp_5x)
+ruler_list.append(r_dynamic_rsp_6x)
 
 r_squeeze_with_constant = {
 "ruler_name": "r_squeeze_with_constant",
@@ -4594,6 +4756,102 @@ r_slice_to_stride_slice = {
 }
 ruler_list.append(r_slice_to_stride_slice)
 
+r_slice_with_4_inputs = {
+"ruler_name": "r_slice_with_4_inputs",
+"src_ops_alias": ["Slice", "Constant"],
+"src_inter_flow": [["Constant:out0", "Slice:in4"]],
+"src_in_anchor": [["I_0:out0", "Slice:in0"], ["I_1:out0", "Slice:in1"],
+                  ["I_2:out0", "Slice:in2"], ["I_3:out0", "Slice:in3"]],
+"src_out_tensor": ["Slice:out0"],
+"acu_lys_alias": ["slice"],
+"src_acu_in_tensor_map": [["I_0:out0", "slice:in0"]],
+"src_acu_out_tensor_map": [["Slice:out0", "slice:out0"]],
+"acu_inter_flow": [],
+"param_map": {"slice": {
+    'begin':["INTS", "CODE",
+             "self.slice_ex_begin(node['Slice'], self.shape_pick(tensor['I_0:out0']), tensor['I_1:out0'], "
+             "tensor['I_3:out0'])"],
+    'size':["INTS", "CODE",
+            "self.slice_ex_size(node['Slice'], self.shape_pick(tensor['I_0:out0']), "
+                                "tensor['I_1:out0'], tensor['I_2:out0'], tensor['I_3:out0'])"]}},
+"blob_map": {"slice": {}},
+"priority_tip": 1,
+"pre_condition": "self.is_const_node(node['I_1'])"
+                 "and self.is_const_node(node['I_2'])"
+                 "and self.is_const_node(node['I_3'])"
+                 "and np.all(self.tensor_to_numpy(tensor['Constant:out0']) == 1)",
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]
+}
+ruler_list.append(r_slice_with_4_inputs)
+
+r_slice_to_slice_op = {
+"ruler_name": "r_slice_to_slice_op",
+"src_ops_alias": ["Slice"],
+"src_inter_flow": [],
+"src_in_anchor": [["I_0:out0", "Slice:in0"], ["I_1:out0", "Slice:in1"],
+                  ["I_1:out0", "Slice:in3"], ["I_2:out0", "Slice:in2"],
+                  ["I_3:out0", "Slice:in4"]],
+"src_out_tensor": ["Slice:out0"],
+"acu_lys_alias": ["slice_op"],
+"src_acu_in_tensor_map": [["I_0:out0", "slice_op:in0"], ["I_1:out0", "slice_op:in1"],
+                          ["I_2:out0", "slice_op:in2"], ["I_1:out0", "slice_op:in3"],
+                          ["I_3:out0", "slice_op:in4"]],
+"src_acu_out_tensor_map": [["Slice:out0", "slice_op:out0"]],
+"acu_inter_flow": [],
+"param_map": {"slice_op": {}},
+"blob_map": {"slice_op": {}},
+"priority_tip": 0,
+"pre_condition": "not self.is_const_node(node['I_1']) or not self.is_const_node(node['I_2'])",
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]
+}
+ruler_list.append(r_slice_to_slice_op)
+
+r_slice_with_3_inputs = {
+"ruler_name": "r_slice_with_3_inputs",
+"src_ops_alias": ["Slice"],
+"src_inter_flow": [],
+"src_in_anchor": [["I_0:out0", "Slice:in0"], ["I_1:out0", "Slice:in1"], ["I_2:out0", "Slice:in2"]],
+"src_out_tensor": ["Slice:out0"],
+"acu_lys_alias": ["slice_op"],
+"src_acu_in_tensor_map": [["I_0:out0", "slice_op:in0"], ["I_1:out0", "slice_op:in1"], ["I_2:out0", "slice_op:in2"]],
+"src_acu_out_tensor_map": [["Slice:out0", "slice_op:out0"]],
+"acu_inter_flow": [],
+"param_map": {"slice_op": {}},
+"blob_map": {"slice_op": {}},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]
+}
+ruler_list.append(r_slice_with_3_inputs)
+
+r_slice_3_inputs = {
+"ruler_name": 'r_slice_3_inputs',
+"src_ops_alias": ["Slice", "Constant", "Constant_1"],
+"src_inter_flow": [["Constant:out0", "Slice:in3"], ["Constant_1:out0", "Slice:in4"]],
+"src_in_anchor": [["I_0:out0", "Slice:in0"], ["I_1:out0", "Slice:in1"], ["I_2:out0", "Slice:in2"]],
+"src_out_tensor": ["Slice:out0"],
+"acu_lys_alias": ["slice_op"],
+"src_acu_in_tensor_map": [["I_0:out0", "slice_op:in0"], ["I_1:out0", "slice_op:in1"],
+                          ["I_2:out0", "slice_op:in2"]],
+"src_acu_out_tensor_map": [["Slice:out0", "slice_op:out0"]],
+"acu_inter_flow": [],
+"param_map": {
+    "slice_op": {
+        "axes": ['INTS','CODE', "self.tensor_to_numpy(tensor['Constant:out0']).tolist()"],
+        "steps": ['INTS','CODE', "self.tensor_to_numpy(tensor['Constant_1:out0']).tolist()"],
+    }
+},
+"blob_map": {"slice_op": {}},
+"priority_tip": 0,
+"pre_condition": "not self.is_const_node(node['I_1']) or not self.is_const_node(node['I_2'])",
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]
+}
+ruler_list.append(r_slice_3_inputs)
+
 r_upsample_l7_to_resize = {
 "ruler_name": "upsample_l7_to_resize",
 "src_ops_alias": ["Upsample"],
@@ -4985,6 +5243,28 @@ r_pad_11 = {
 "src_ops_main_version": None,
 "src_ops_minior_version": [11, -1]}
 ruler_list.append(r_pad_11)
+
+r_pad_11_pads_const = {
+    "ruler_name": "r_pad_11_pads_const",
+    "src_ops_alias": ["Pad", "Constant"],
+    "src_inter_flow": [["Constant:out0", "Pad:in2"]],
+    "src_in_anchor": [["I:out0", "Pad:in0"], ["I_1:out0", "Pad:in1"]],
+    "src_out_tensor": ["Pad:out0"],
+    "acu_lys_alias": ["pad"],
+    "src_acu_in_tensor_map": [["I:out0", "pad:in0"]],
+    "src_acu_out_tensor_map": [["Pad:out0", "pad:out0"]],
+    "param_map": {"pad":
+                      {'padding_value': ['ORIGIN', 'PYFUNC', r_pad_value_map(pads_name='I_1:out0')],
+                       'padding_mode': ['STRING', 'CODE', "self.attr_pick(node['Pad'], 'mode', 'constant')"],
+                       }
+                  },
+    "blob_map": {"pad": {}},
+    "acu_inter_flow": [],
+    "priority_tip": 0,
+    "pre_condition": "self.is_const_tensor(tensor['I_1:out0'])",
+    "src_ops_main_version": None,
+    "src_ops_minior_version": [11, -1]}
+ruler_list.append(r_pad_11_pads_const)
 
 r_pad_1 = {
 "ruler_name": "r_pad_1",
@@ -5694,6 +5974,50 @@ r_reducel2_to_noop_with_constant_axes = {
 }
 ruler_list.append(r_reducel2_to_noop_with_constant_axes)
 
+r_reducel2 = {
+"ruler_name": 'r_reducel2',
+"src_ops_alias": ["ReduceL2"],
+"src_inter_flow": [],
+"src_in_anchor": [["I_0:out0", "ReduceL2:in0"]],
+"src_out_tensor": ["ReduceL2:out0"],
+"acu_lys_alias": ["reducel2"],
+"src_acu_in_tensor_map": [["I_0:out0", "reducel2:in0"]],
+"src_acu_out_tensor_map": [["ReduceL2:out0", "reducel2:out0"]],
+"acu_inter_flow": [],
+"param_map": {"reducel2": {'axis_list': ['INTS', 'CODE', "self.reducex_axis_list(node['ReduceL2'], "
+                                                         "self.shape_pick(tensor['I_0:out0']))"],
+                           'keep_dims': ['BOOL', 'CODE', "self.attr_pick(node['ReduceL2'], 'keepdims', 1)"]}},
+"blob_map": {"reducel2": {}},
+"priority_tip": 1,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]
+}
+ruler_list.append(r_reducel2)
+
+r_reducel2_with_constant_axes = {
+"ruler_name": "r_reducel2_with_constant_axes",
+"src_ops_alias": ["ReduceL2", "Constant"],
+"src_inter_flow": [["Constant:out0", "ReduceL2:in1"]],
+"src_in_anchor": [["I_0:out0", "ReduceL2:in0"]],
+"src_out_tensor": ["ReduceL2:out0"],
+"acu_lys_alias": ["reducel2"],
+"src_acu_in_tensor_map": [["I_0:out0", "reducel2:in0"]],
+"src_acu_out_tensor_map": [["ReduceL2:out0", "reducel2:out0"]],
+"acu_inter_flow": [],
+"param_map": {"reducel2": {'axis_list': ["INTS", "CODE",
+                                         "self.reducesum_constant_axis_list(node['ReduceL2'], tensor['Constant:out0'],"
+                                         "self.shape_pick(tensor['I_0:out0']))"],
+                           'keep_dims': ['BOOL', 'CODE', "self.attr_pick(node['ReduceL2'], 'keepdims', 1)"]}},
+"blob_map": {},
+"priority_tip": 1,
+"pre_condition": "not (len(self.tensor_to_numpy(tensor['Constant:out0']).tolist()) == 0 and "
+                 "self.attr_pick(node['ReduceL2'], 'noop_with_empty_axes', 0) == 1)",
+"src_ops_main_version": None,
+"src_ops_minior_version": [18, -1]
+}
+ruler_list.append(r_reducel2_with_constant_axes)
+
 r_reducelogsum = {
 "ruler_name": "r_reducelogsum",
 "src_ops_alias": ["ReduceLogSum"],
@@ -6317,7 +6641,7 @@ r_qlinearmatmul = {
     ["CODE", "self.qnt_out_tensor(acu_ly['matmul'], tensor['Constant_4:out0'], tensor['Constant_5:out0'], 0)"],
 ],
 "priority_tip": 0,
-"pre_condition": "self.tensor_to_numpy(tensor['Constant_2:out0']).shape[0] == 1",
+"pre_condition": "self.tensor_to_numpy(tensor['Constant_2:out0']).ndim == 0",
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_qlinearmatmul)
@@ -6367,7 +6691,7 @@ r_qlinearmatmul_var = {
     ["CODE", "self.qnt_out_tensor(acu_ly['matmul'], tensor['Constant_5:out0'], tensor['Constant_6:out0'], 0)"],
 ],
 "priority_tip": 0,
-"pre_condition": "self.tensor_to_numpy(tensor['Constant_3:out0']).shape[0] == 1", #only support per-tensor scale
+"pre_condition": "self.tensor_to_numpy(tensor['Constant_3:out0']).ndim == 0", #only support per-tensor scale
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_qlinearmatmul_var)
@@ -6514,6 +6838,58 @@ ruler_list.append(r_qlinearconv_with_bias)
 #Constant_3:Initializer_W_SCALE;Constant_4:Initializer_W_ZP;Constant_5:Initializer_Y_SCALE;
 #Constant_6:Initializer_Y_ZP;Constant_7:Initializer_B
 
+"""
+Synaptics change BEGIN 
+
+vsi patch to resolve the INT16 quantization issue with the Optical Character Recognition (OCR) model.
+
+This change from vsi primarily focuses on:
+- Fusing conv + mul + add operations into a single conv operation for optimization.
+"""
+r_conv_mul_add = {
+"ruler_name": "r_conv_mul_add",
+"src_ops_alias": ["Add", "Mul", "Constant", "Constant_1", "Conv", "Constant_2", "Constant_3"],
+"src_inter_flow": [["Mul:out0", "Add:in0"], ["Constant:out0", "Add:in1"], ["Constant_1:out0", "Mul:in0"],
+                   ["Conv:out0", "Mul:in1"], ["Constant_2:out0", "Conv:in1"], ["Constant_3:out0", "Conv:in2"]],
+"src_in_anchor": [["I_0:out0", "Conv:in0"]],
+"src_out_tensor": ["Add:out0"],
+"acu_lys_alias": ["convolution"],
+"src_acu_in_tensor_map": [["I_0:out0", "convolution:in0"]],
+"src_acu_out_tensor_map": [["Add:out0", "convolution:out0"]],
+"acu_inter_flow": [],
+"param_map": {"convolution": {
+    "weights": ["INT", "CODE", "self.shape_pick(tensor['Constant_2:out0'])[0]"],
+    "pad_method":
+        ["STRING", "CODE", "'auto' if self.attr_pick(node['Conv'], 'pads', None) == None else 'padding_const'"],
+    "bias": ["BOOL", "VALUE", True],
+    "ksize_w": ["INT", "CODE", "self.shape_pick(tensor['Constant_2:out0'])[3]"],
+    "ksize_h": ["INT", "CODE", "self.shape_pick(tensor['Constant_2:out0'])[2]"],
+    "stride_w": ["INT", "CODE", "self.attr_pick(node['Conv'], 'strides', [1, 1])[1]"],
+    "stride_h": ["INT", "CODE", "self.attr_pick(node['Conv'], 'strides', [1, 1])[0]"],
+    "group_number": ["INT", "CODE", "self.attr_pick(node['Conv'], 'group', 1)"],
+    "dilation": ['INT', 'CODE', "self.attr_pick(node['Conv'], 'dilations') "\
+                                "if isinstance(self.attr_pick(node['Conv'], 'dilations'), int) "\
+                                "else self.attr_pick(node['Conv'], 'dilations')[0]"],
+    "padding": ["STRING", "CODE", "'SAME' if self.attr_pick(node['Conv'], 'auto_pad', 'NOTSET') "\
+                                  "in ['SAME_UPPER', 'SAME_LOWER'] else 'VALID' "],
+    "pad": ["INTS", "CODE",
+            "[p for p in self.array_layout(self.attr_pick(node['Conv'], 'pads', [0, 0, 0, 0]), [0, 2, 1, 3])]"]}
+},
+"blob_map": {"convolution": {
+    "weight": ["CODE",
+               "self.tensor_to_numpy(tensor['Constant_2:out0'])*self.tensor_to_numpy(tensor['Constant_1:out0'])"],
+    "bias": ["CODE",
+             "self.tensor_to_numpy(tensor['Constant_3:out0']) * self.tensor_to_numpy(tensor['Constant_1:out0']) "\
+             "+ self.tensor_to_numpy(tensor['Constant:out0'])"]}
+},
+"priority_tip": 0,
+"pre_condition": r_conv_mul_add_pre_condition(),
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_conv_mul_add)
+""" 
+Synaptics change END 
+"""
 r_qlinearconv_1d_with_bias_share_zp = {
 "ruler_name": "qlinearconv_1d_with_bias_share_zp",
 "src_ops_alias": ["QLinearConv", "Constant", "Constant_1", "Constant_2",
@@ -6569,12 +6945,12 @@ r_qlinearconv_1d_with_bias_share_zp = {
              },
 "extension": [
     ["CODE", "self.qnt_coef_tensor("
-             "'weight', acu_ly['convolution'],"
+             "'weight', acu_ly['conv1d'],"
              "tensor['Constant_3:out0'],"
              "tensor['Constant_1:out0'])"],
-    ["CODE", "self.qnt_bias_tensor(acu_ly['convolution'], tensor['Constant:out0'], tensor['Constant_3:out0'])"],
-    ["CODE", "self.qnt_out_tensor(acu_ly['convolution'], tensor['Constant_4:out0'], tensor['Constant_1:out0'], 0)"],
-    ["CODE", "self.qnt_in_tensor(acu_ly['convolution'], tensor['Constant:out0'], tensor['Constant_1:out0'], 0)"]
+    ["CODE", "self.qnt_bias_tensor(acu_ly['conv1d'], tensor['Constant:out0'], tensor['Constant_3:out0'])"],
+    ["CODE", "self.qnt_out_tensor(acu_ly['conv1d'], tensor['Constant_4:out0'], tensor['Constant_1:out0'], 0)"],
+    ["CODE", "self.qnt_in_tensor(acu_ly['conv1d'], tensor['Constant:out0'], tensor['Constant_1:out0'], 0)"]
 ],
 "priority_tip": 0,
 "pre_condition": None,
@@ -6713,6 +7089,7 @@ r_qlinearavgpool = {
          "'SAME' if self.attr_pick(node['QLinearAveragePool'], 'auto_pad', 'NOTSET') in ['SAME_UPPER',"
          "'SAME_LOWER'] else 'VALID'"
         ],
+        "dilation": ["INTS", "CODE", "self.conv_dilation(node['QLinearAveragePool'])"]
 }},
 "blob_map": {"pooling": {}},
 "priority_tip": 0,
@@ -6797,7 +7174,7 @@ r_one_hot = {
 "acu_inter_flow": [],
 "param_map": {
     "one_hot": {
-        'depth': ['INT', 'CODE', "self.tensor_to_numpy(tensor['Constant:out0'])[0]"],
+        'depth': ['INT', 'CODE', "self.tensor_to_numpy(tensor['Constant:out0'])"],
         'on_value': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['Constant_1:out0'])[1]"],
         'off_value': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['Constant_1:out0'])[0]"],
         'axis': ['INT', 'CODE', "self.attr_pick(node['OneHot'], 'axis', -1)"],
@@ -6907,7 +7284,7 @@ r_mean_variance_normalization = {
 "blob_map": {},
 "acu_inter_flow": [],
 "priority_tip": 0,
-"pre_condition": "self.attr_pick(node['MeanVarianceNormalization'], 'axes', [0, 2, 3]) == [0, 2, 3]",
+"pre_condition": "self.attr_pick(node['MeanVarianceNormalization'], 'axes', [0, 2, 3]) == [2, 3]",
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_mean_variance_normalization)
@@ -7003,6 +7380,37 @@ r_topk = {
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, 9]}
 ruler_list.append(r_topk)
+
+r_rmsnormalize = {
+"ruler_name": "r_rmsnormalize",
+"src_ops_alias": ["Mul", "Mul_1", "Constant", "Div", "Constant_1", "Sqrt",
+                  "Add", "ReduceMean", "Constant_2", "Pow", "Constant_3"],
+"src_inter_flow": [["Mul_1:out0", "Mul:in0"], ["Constant:out0", "Mul:in1"], ["Div:out0", "Mul_1:in1"],
+                   ["Constant_1:out0", "Div:in0"], ["Sqrt:out0", "Div:in1"], ["Add:out0", "Sqrt:in0"],
+                   ["ReduceMean:out0", "Add:in0"], ["Constant_2:out0", "Add:in1"], ["Pow:out0", "ReduceMean:in0"],
+                   ["Constant_3:out0", "Pow:in1"]],
+"src_in_anchor": [["I_0:out0", "Pow:in0"], ["I_0:out0", "Mul_1:in0"]],
+"src_out_tensor": ["Mul:out0"],
+"acu_lys_alias": ["rmsnormalize"],
+"src_acu_in_tensor_map": [["I_0:out0", "rmsnormalize:in0"]],
+"src_acu_out_tensor_map": [["Mul:out0", "rmsnormalize:out0"]],
+"acu_inter_flow": [],
+"param_map": {
+    "rmsnormalize": {
+        "axis": ["INT", "VALUE", -1],
+        "eps": ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['Constant_2:out0'])"],
+    }
+},
+"blob_map": {
+    "rmsnormalize": {
+        "scale": ['CODE', "self.tensor_to_numpy(tensor['Constant:out0'])"],
+    }
+},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_rmsnormalize)
 
 r_layernormalize = {
 "ruler_name": "r_layernormalize",
@@ -7271,7 +7679,7 @@ r_gelu_1 = {
 "src_acu_in_tensor_map": [["I_0:out0", "gelu:in0"]],
 "src_acu_out_tensor_map": [["Mul:out0", "gelu:out0"]],
 "acu_inter_flow": [],
-"param_map": {"gelu": {'approximate':['BOOL', 'VALUE', False]}},
+"param_map": {"gelu": {'approximate':['BOOL', 'VALUE', True]}},
 "blob_map": {"gelu": {}},
 "priority_tip": 0,
 "pre_condition": None,
@@ -7299,6 +7707,50 @@ r_gelu_2 = {
 "src_ops_main_version": None,
 "src_ops_minior_version": [1, -1]}
 ruler_list.append(r_gelu_2)
+
+r_gelu_3 = {
+"ruler_name": "r_gelu_3",
+"src_ops_alias": ["Mul", "Mul_1", "Add", "Constant", "Tanh", "Constant_1", "Mul_2", "Add_1",
+                  "Constant_2", "Mul_3", "Pow", "Constant_3", "Constant_4"],
+"src_inter_flow": [["Mul_1:out0", "Mul:in0"], ["Add:out0", "Mul:in1"], ["Constant:out0", "Mul_1:in1"],
+                   ["Tanh:out0", "Add:in0"], ["Constant_1:out0", "Add:in1"], ["Mul_2:out0", "Tanh:in0"],
+                   ["Add_1:out0", "Mul_2:in0"], ["Constant_2:out0", "Mul_2:in1"], ["Mul_3:out0", "Add_1:in1"],
+                   ["Pow:out0", "Mul_3:in0"], ["Constant_3:out0", "Mul_3:in1"], ["Constant_4:out0", "Pow:in1"]],
+"src_in_anchor": [["I_0:out0", "Mul_1:in0"], ["I_0:out0", "Pow:in0"], ["I_0:out0", "Add_1:in0"]],
+"src_out_tensor": ["Mul:out0"],
+"acu_lys_alias": ["gelu"],
+"src_acu_in_tensor_map": [["I_0:out0", "gelu:in0"]],
+"src_acu_out_tensor_map": [["Mul:out0", "gelu:out0"]],
+"acu_inter_flow": [],
+"param_map": {"gelu": {'approximate': ['BOOL', 'VALUE', True]}},
+"blob_map": {"gelu": {}},
+"priority_tip": 0,
+"pre_condition": "(self.tensor_to_numpy(tensor['Constant:out0']) == 0.5).all() and "\
+                "(self.tensor_to_numpy(tensor['Constant_1:out0']) == 1.0).all() and "\
+                "(self.tensor_to_numpy(tensor['Constant_4:out0']) == 3.0).all()",
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]}
+ruler_list.append(r_gelu_3)
+
+r_gelu_4 = {
+    "ruler_name": "r_gelu_4",
+    "src_ops_alias": ["Mul", "Mul_1", "Constant", "Add", "Erf", "Constant_1", "Mul_2", "Constant_2"],
+    "src_inter_flow": [["Mul_1:out0", "Mul:in0"], ["Constant:out0", "Mul:in1"], ["Add:out0", "Mul_1:in1"],
+                       ["Erf:out0", "Add:in0"], ["Constant_1:out0", "Add:in1"], ["Mul_2:out0", "Erf:in0"],
+                       ["Constant_2:out0", "Mul_2:in1"]],
+    "src_in_anchor": [["I_0:out0", "Mul_2:in0"], ["I_0:out0", "Mul_1:in0"]],
+    "src_out_tensor": ["Mul:out0"],
+    "acu_lys_alias": ["gelu"],
+    "src_acu_in_tensor_map": [["I_0:out0", "gelu:in0"]],
+    "src_acu_out_tensor_map": [["Mul:out0", "gelu:out0"]],
+    "acu_inter_flow": [],
+    "param_map": {"gelu": {'approximate': ['BOOL', 'VALUE', False]}},
+    "blob_map": {"gelu": {}},
+    "priority_tip": 0,
+    "pre_condition": None,
+    "src_ops_main_version": None,
+    "src_ops_minior_version": [1, -1]}
+ruler_list.append(r_gelu_4)
 
 r_mish = {
 "ruler_name": "r_mish",
@@ -7640,6 +8092,25 @@ r_col2im = {
 "src_ops_minior_version": [18, -1]
 }
 ruler_list.append(r_col2im)
+
+r_range = {
+"ruler_name": "r_range",
+"src_ops_alias": ["Range"],
+"src_inter_flow": [],
+"src_in_anchor": [["I_0:out0", "Range:in0"], ["I_1:out0", "Range:in1"], ["I_2:out0", "Range:in2"]],
+"src_out_tensor": ["Range:out0"],
+"acu_lys_alias": ["range"],
+"src_acu_in_tensor_map": [["I_0:out0", "range:in0"], ["I_1:out0", "range:in1"], ["I_2:out0", "range:in2"]],
+"src_acu_out_tensor_map": [["Range:out0", "range:out0"]],
+"acu_inter_flow": [],
+"param_map": {},
+"blob_map": {},
+"priority_tip": 0,
+"pre_condition": None,
+"src_ops_main_version": None,
+"src_ops_minior_version": [1, -1]
+}
+ruler_list.append(r_range)
 
 
 def gen_onnx_ruler(dst_path):

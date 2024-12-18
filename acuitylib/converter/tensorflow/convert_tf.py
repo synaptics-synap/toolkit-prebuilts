@@ -122,7 +122,7 @@ class convert_tf():
             for size in input_size_list:
                 if len(size) == 0:  # scalar
                     self.input_is_scalar_list.append(True)
-                    size.append(1)
+                    # size.append(1)
                 else:
                     self.input_is_scalar_list.append(False)
             if len(input_size_list) != 0 and len(input_size_list) != len(inputs):
@@ -189,9 +189,18 @@ class convert_tf():
         node_name, dir, port = tlo().tensor_label_split(tensor_name)
         if self.is_const(node_name):
             if self.tensor_to_numpy(tensor_name).shape == ():
-                return [1]
+                return []
             return self.tensor_to_numpy(tensor_name).shape
         return self.tfg_preprocess.query_tensors(tensor_name, ret='shape')[0]
+
+    def dtype_pick(self, tensor_name):
+        tensor_factory = self.tensor_model.tensor_factory(self.tensor_model.product_by(tensor_name))
+        if 'dtype' not in tensor_factory.params:
+            al.e("Unknown data type of {}".format(tensor_name))
+        type = tensor_factory.params['dtype']
+        if not DType.is_backend_dtype_support(type, 'tensorflow'):
+            al.e("Unknown data type {} of tensor {}".format(type, tensor_name))
+        return DType.map_to_acuity_dtype(type, 'tensorflow')
 
     def tensor_is_scalar(self, tensor_ref):
         return self.shape_pick(tensor_ref) == ()
@@ -227,8 +236,8 @@ class convert_tf():
         #this is a workaround to let functions such as INTS, FLOATS in paragraph.py
         #could process array smoothly without meet issue like:
         #'iteration over a 0-d array'
-        if np_data.shape is tuple():
-            np_data.shape = (1)
+        # if np_data.shape is tuple():
+        #     np_data.shape = (1)
         return np_data
 
     def squeeze_shapes(self, axes, shapes):
@@ -253,13 +262,10 @@ class convert_tf():
         if reshape_size[0] == 1:
             if -1 not in reshape_size:
                 reshape_size[0] = -1
-            else:
-                reshape_size[0] = 0
-                al.w('Network may not support batch > 1 !')
         return reshape_size
 
     def split_slice(self, dim, in_shape, split_num):
-        return [int(in_shape[dim[0]] / split_num) * i for i in range(1, split_num)]
+        return [int(in_shape[dim] / split_num) * i for i in range(1, split_num)]
 
     def splitv_slice(self, const , split_num):
         slices = []

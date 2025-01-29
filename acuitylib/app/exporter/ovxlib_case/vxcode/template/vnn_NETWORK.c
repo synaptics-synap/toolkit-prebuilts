@@ -224,6 +224,7 @@ vsi_nn_graph_t * vnn_Create#NETWORK_NAME#
     vsi_nn_SetGraphVersion( graph, VNN_VERSION_MAJOR, VNN_VERSION_MINOR, VNN_VERSION_PATCH );
 #SET_GRAPH_INPUTS#
     vsi_nn_SetGraphOutputs( graph, NULL, #NET_OUTPUT_NUM# );
+    vsi_nn_SetGraphFastMode(graph,FALSE);
 
 /*-----------------------------------------
   Register client ops

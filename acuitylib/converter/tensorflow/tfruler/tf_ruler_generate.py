@@ -312,12 +312,15 @@ r_variable = {
 "acu_lys_alias": ["variable"],
 "src_acu_in_tensor_map": [],
 "src_acu_out_tensor_map": [["C:out0", "variable:out0"]],
-"param_map": {"variable": {'shape': ['ORIGIN', 'CODE', "self.shape_pick(tensor['C:out0'])"]}},
+"param_map": {"variable": {'shape': ['ORIGIN', 'CODE', "self.shape_pick(tensor['C:out0'])"],
+                           'is_scalar': ['BOOL', 'CODE',
+                            "True if len(self.tensor_to_numpy(tensor['C:out0']).shape) "
+                            "== 0 else False "],
+                           'type': ["STRING", "CODE", "self.dtype_pick(tensor['C:out0'])"],
+                           }
+              },
 "blob_map": {"variable": {'data':
-                              ['CODE',
-                               "np.array([self.tensor_to_numpy(tensor['C:out0'])], dtype=np.float32) "\
-                               " if self.tensor_to_numpy(tensor['C:out0']).shape == ()"\
-                               "else self.tensor_to_numpy(tensor['C:out0'])"],}},
+                              ['CODE', "self.tensor_to_numpy(tensor['C:out0'])"],}},
 "acu_inter_flow": [],
 "priority_tip": 0,
 "pre_condition": None}
@@ -649,8 +652,8 @@ r_tfleakrelu ={
 "blob_map": {"leakyrelu": {}},
 "acu_inter_flow": [],
 "priority_tip": 0,
-"pre_condition": "len(self.tensor_to_numpy(tensor['C:out0']).tolist()) == 1 and "
-                 "isinstance(self.tensor_to_numpy(tensor['C:out0']).tolist()[0], float)"}
+"pre_condition": "self.tensor_to_numpy(tensor['C:out0']).ndim == 0 and "
+                 "self.tensor_to_numpy(tensor['C:out0']).dtype.name == 'float32'"}
 ruler_list.append(r_tfleakrelu)
 
 r_gelu_no_approximate = {
@@ -961,6 +964,26 @@ r_merge_to_prelu = {
 }
 ruler_list.append(r_merge_to_prelu)
 
+r_conv1d_winograd = {
+"ruler_name": "winograd_conv1d",
+"src_ops_alias": ["Conv", "ExpandDims", "C", "C_1"],
+"src_inter_flow": [["ExpandDims:out0", "Conv:in0"],  ["C:out0", "Conv:in1"], ["C_1:out0", "ExpandDims:in1"]],
+"src_in_anchor": [["I:out0", "ExpandDims:in0"]],
+"src_out_tensor": ["Conv:out0"],
+"acu_lys_alias": ["conv1d_winograd"],
+"src_acu_in_tensor_map": [["I:out0", "conv1d_winograd:in0"]],
+"src_acu_out_tensor_map": [["Conv:out0", "conv1d_winograd:out0"]],
+"acu_inter_flow": [],
+"param_map": {"conv1d_winograd": {'ksize': ['INT', 'CODE', "self.shape_pick(tensor['C:out0'])[1]"],
+                            'stride': ['INT', 'CODE', "self.attr_pick(node['Conv'], 'strides')[2]"],
+                            'padding': ['STRING', 'CODE', "self.attr_pick(node['Conv'], 'padding')"],
+                            'bias': ['BOOL', 'VALUE', False],
+                            'weights': ['INT', 'CODE', "self.shape_pick(tensor['C:out0'])[3]"]}},
+"blob_map": {"conv1d_winograd": {'weight': ['CODE', "np.squeeze(self.tensor_to_numpy(tensor['C:out0']), 0)"]}},
+"priority_tip": 0,
+"pre_condition": "node_name == 'ACUITY_ATF_wino1d'"}
+ruler_list.append(r_conv1d_winograd)
+
 r_conv_1d = {
 "ruler_name": "conv1d",
 "src_ops_alias": ["Squeeze", "Conv", "ExpandDims", "C", "C_1"],
@@ -1005,6 +1028,32 @@ r_conv_1d_bias = {
 "pre_condition": r_conv2d_2_conv1d_pre_condition(conv2d_weight='C_1:out0')}
 ruler_list.append(r_conv_1d_bias)
 
+r_conv2d_winograd ={
+"ruler_name": "winograd_conv2d",
+"src_ops_alias": ["Conv", "C"],
+"src_inter_flow": [["C:out0", "Conv:in1"]],
+"src_in_anchor": [["I:out0", "Conv:in0"]],
+"src_out_tensor": ["Conv:out0"],
+"acu_lys_alias": ["conv2d_winograd"],
+"src_acu_in_tensor_map": [["I:out0", "conv2d_winograd:in0"]],
+"src_acu_out_tensor_map": [["Conv:out0", "conv2d_winograd:out0"]],
+"param_map": {"conv2d_winograd": {
+                            'ksize_h': ['INT', 'CODE', "self.shape_pick(tensor['C:out0'])[0]"],
+                            'ksize_w': ['INT', 'CODE', "self.shape_pick(tensor['C:out0'])[1]"],
+                            'stride_h': ['INT', 'CODE', "self.attr_pick(node['Conv'], 'strides')[1]"],
+                            'stride_w': ['INT', 'CODE', "self.attr_pick(node['Conv'], 'strides')[2]"],
+                            'padding': ['STRING', 'CODE', "self.attr_pick(node['Conv'], 'padding')"],
+                            'pad': ['INTS', 'CODE', "self.attr_pick(node['Conv'], 'explicit_paddings', [0,0,0,0])"],
+                            'bias': ['BOOL', 'VALUE', False],
+                            'weights': ['INT', 'CODE', "self.shape_pick(tensor['C:out0'])[3]"],
+                            'wino_n': ['INT', 'VALUE', 2]}},
+"blob_map": {"conv2d_winograd": {'weight': ['CODE', "self.tensor_to_numpy(tensor['C:out0'])"],
+                               }},
+"acu_inter_flow": [],
+"priority_tip": 0,
+"pre_condition": "node_name == 'ACUITY_ATF_wino2d'"}
+ruler_list.append(r_conv2d_winograd)
+
 r_conv ={
 "ruler_name": "single_convolution",
 "src_ops_alias": ["Conv", "C"],
@@ -1019,6 +1068,7 @@ r_conv ={
                             'stride_h': ['INT', 'CODE', "self.attr_pick(node['Conv'], 'strides')[1]"],
                             'stride_w': ['INT', 'CODE', "self.attr_pick(node['Conv'], 'strides')[2]"],
                             'padding': ['STRING', 'CODE', "self.attr_pick(node['Conv'], 'padding')"],
+                            'pad': ['INTS', 'CODE', "self.attr_pick(node['Conv'], 'explicit_paddings', [0,0,0,0])"],
                             'dilation': ['INTS', 'CODE', "self.attr_pick(node['Conv'], 'dilations', [1,1,1,1])"],
                             'bias': ['BOOL', 'VALUE', False],
                             'weights': ['INT', 'CODE', "self.shape_pick(tensor['C:out0'])[3]"]}},
@@ -1958,7 +2008,7 @@ r_l2normalize = {
 "src_acu_out_tensor_map": [["Mul:out0", "l2normalize:out0"]],
 "acu_inter_flow": [],
 "param_map": {"l2normalize":
-                  {'l2n_dim': ['INTS', 'CODE', "self.tensor_to_numpy(tensor['C_1:out0'])"],
+                  {'l2n_dim': ['INT_OR_INTS', 'CODE', "self.tensor_to_numpy(tensor['C_1:out0'])"],
                    'eps': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])"]}},
 "blob_map": {},
 "priority_tip": 0,
@@ -3281,10 +3331,12 @@ def r_get_expand_dim_out_shape(self, node, tensor, axis_tensor_name):
     input_shape = list(self.shape_pick(tensor['I:out0']))
     input_shape_dims = len(input_shape)
     axis = self.tensor_to_numpy(tensor['C:out0'])
+    if axis.ndim == 1:
+        axis = axis[0]
     # convert netagive axis to positive to calculate output shape easier
-    if axis[0] < 0:
-        axis[0] = (axis[0] + (input_shape_dims + 1)) % (input_shape_dims + 1)
-    output_shape = input_shape[0:axis[0]] + [1] + input_shape[axis[0]:]
+    if axis < 0:
+        axis = (axis + (input_shape_dims + 1)) % (input_shape_dims + 1)
+    output_shape = input_shape[0:axis] + [1] + input_shape[axis:]
     return output_shape
 
 r_expand_dim = {
@@ -3449,7 +3501,7 @@ r_padv2 = {
 "param_map": {"pad": {'padding_value': ['ORIGIN', 'CODE', "self.tensor_to_numpy(tensor['C:out0']).tolist()"],
                       'padding_mode': ['ORIGIN', 'CODE', "self.attr_pick(node['PadV2'], 'mode', 'CONSTANT')"],
                       'padding_const': ['ORIGIN', 'CODE',
-                                        "np.round(self.tensor_to_numpy(tensor['C_1:out0']).tolist()[0], 6)"]
+                                        "np.round(self.tensor_to_numpy(tensor['C_1:out0']).tolist(), 6)"]
                       }},
 "blob_map": {"pad": {}},
 "acu_inter_flow": [],
@@ -4652,6 +4704,24 @@ r_identity = {
 "priority_tip": 0,
 "pre_condition": None}
 ruler_list.append(r_identity)
+
+def r_identityN_template(idenN_in_count, out_port_list):
+    r_identityN_dict = {
+"ruler_name": "identityN_in{}_out{}".format(idenN_in_count, len(out_port_list)),
+"src_ops_alias": ["IdentityN"],
+"src_inter_flow": [],
+"src_in_anchor": [["I_{}:out0".format(order), "IdentityN:in{}".format(order)] for order in range(idenN_in_count)],
+"src_out_tensor": ["IdentityN:out{}".format(order) for order in out_port_list],
+"acu_lys_alias": ["noop_{}".format(order) for order in range(idenN_in_count)],
+"src_acu_in_tensor_map": [["I_{}:out0".format(order), "noop_{}:in0".format(order)] for order in range(idenN_in_count)],
+"src_acu_out_tensor_map": [["IdentityN:out{}".format(order), "noop_{}:out0".format(order)]
+                           for order in out_port_list],
+"param_map": {},
+"blob_map": {},
+"acu_inter_flow": [],
+"priority_tip": 0,
+"pre_condition": None}
+    return r_identityN_dict
 
 r_cast = {
 "ruler_name": "cast",
@@ -6727,10 +6797,10 @@ r_nms_v5 = {
     "src_acu_out_tensor_map": [["NonMaxSuppressionV5:out0", "nms:out0"], ["NonMaxSuppressionV5:out1", "nms:out1"],
                                ["NonMaxSuppressionV5:out2", "nms:out2"]],
     "acu_inter_flow": [],
-    "param_map": {"nms": {'max_output_size': ['INT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])[0]"],
-                          'iou_threshold': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_1:out0'])[0]"],
-                          'score_threshold': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_2:out0'])[0]"],
-                          'soft_nms_sigma': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_3:out0'])[0]"],
+    "param_map": {"nms": {'max_output_size': ['INT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])"],
+                          'iou_threshold': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_1:out0'])"],
+                          'score_threshold': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_2:out0'])"],
+                          'soft_nms_sigma': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_3:out0'])"],
                           'pad_to_max_output_size':
                               ['BOOL', 'CODE', "self.attr_pick(node['NonMaxSuppressionV5'],'pad_to_max_output_size')"]
                           },
@@ -6783,7 +6853,7 @@ r_swish_tf28 = {
 "src_acu_in_tensor_map": [["I:out0", "swish:in0"]],
 "src_acu_out_tensor_map": [["Identity:out0", "swish:out0"]],
 "acu_inter_flow": [],
-"param_map": {"swish":{'beta': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])[0]"],
+"param_map": {"swish":{'beta': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])"],
                       },
               },
 "blob_map": {"swish": {}},
@@ -6803,7 +6873,7 @@ r_swish_tf_2_12_0 = {
 "src_acu_in_tensor_map": [["I:out0", "swish:in0"]],
 "src_acu_out_tensor_map": [["Identity:out0", "swish:out0"]],
 "acu_inter_flow": [],
-"param_map": {"swish":{'beta': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])[0]"],
+"param_map": {"swish":{'beta': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])"],
                       },
               },
 "blob_map": {"swish": {}},
@@ -7504,11 +7574,11 @@ r_one_hot = {
 "src_acu_out_tensor_map": [["OneHot:out0", "one_hot:out0"]],
 "acu_inter_flow": [],
 "param_map": {"one_hot": {
-    'depth': ['INT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])[0]"],
+    'depth': ['INT', 'CODE', "self.tensor_to_numpy(tensor['C:out0'])"],
     # 1 is for float32
     'dtype': ['ORIGIN', 'CODE', "self.tf_type_enum_to_ac_type(self.attr_pick(node['OneHot'], 'T', 1))"],
-    'on_value': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_1:out0'])[0]"],
-    'off_value': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_2:out0'])[0]"],
+    'on_value': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_1:out0'])"],
+    'off_value': ['FLOAT', 'CODE', "self.tensor_to_numpy(tensor['C_2:out0'])"],
     'axis': ['INT', 'CODE', "self.attr_pick(node['OneHot'], 'axis', -1)"],
 }},
 "blob_map": {"one_hot": {}},
